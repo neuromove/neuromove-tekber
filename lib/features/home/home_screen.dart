@@ -11,23 +11,63 @@ import '../../shared/state/cloud_account.dart';
 import '../../shared/widgets/widgets.dart';
 import '../profile/activity_insight_card.dart';
 
-class HomeScreen extends ConsumerWidget {
+class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key, this.referenceDate});
   final DateTime? referenceDate;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen> {
+  bool _isUpdatingProgress = false;
+
+  Future<void> _toggleExercise(String id) async {
+    if (_isUpdatingProgress) return;
+    setState(() => _isUpdatingProgress = true);
+    try {
+      await ref.read(appStateProvider.notifier).toggleExercise(id);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Progres latihan belum dapat disimpan.'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isUpdatingProgress = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final state = ref.watch(appStateProvider);
-    final now = referenceDate ?? DateTime.now();
-    final activities = state.schedule.activitiesForDay(now.weekday - 1);
+    final profile = state.profile;
+    final assessment = state.assessment;
+    final schedule = state.schedule;
+    final hasAssessment =
+        state.hasSavedProfile && (profile.canAssess || profile.hardGate);
+    final hasSchedule = schedule.activities.isNotEmpty;
+    final factors = {
+      for (final factor in assessment.factors) factor.label: factor,
+    };
+    final hasBloodPressure =
+        (int.tryParse(profile.systolic) ?? 0) > 0 &&
+        (int.tryParse(profile.diastolic) ?? 0) > 0;
+    final now = widget.referenceDate ?? DateTime.now();
+    final activities = schedule.activitiesForDay(now.weekday - 1);
     final completed = activities.where((item) => item.completed).length;
-    final pending = activities.where((item) => !item.completed);
+    final nextActivity = activities
+        .where((item) => !item.completed)
+        .firstOrNull;
+    final progressMessage = completed == activities.length
+        ? 'Target hari ini selesai. Terima kasih sudah konsisten!'
+        : '$completed dari ${activities.length} target hari ini selesai';
     final canExercise =
-        state.hasSavedProfile &&
-        state.scheduleApproved &&
-        !state.assessment.requiresReferral;
-    final name = state.hasSavedProfile && state.profile.name.trim().isNotEmpty
-        ? state.profile.name.trim()
+        hasSchedule && state.scheduleApproved && !assessment.requiresReferral;
+    final name = state.hasSavedProfile && profile.name.trim().isNotEmpty
+        ? profile.name.trim()
         : 'Selamat datang';
     final greeting = switch (now.hour) {
       >= 5 && < 11 => 'SELAMAT PAGI!',
@@ -114,8 +154,7 @@ class HomeScreen extends ConsumerWidget {
               ),
             ),
             const SizedBox(height: 20),
-            if (!state.hasSavedProfile ||
-                (!state.profile.canAssess && !state.profile.hardGate))
+            if (!hasAssessment)
               _HomeNotice(
                 title: 'Mulai dari profil kesehatan',
                 message:
@@ -124,12 +163,20 @@ class HomeScreen extends ConsumerWidget {
                 onPressed: () => context.push('/profile'),
               )
             else ...[
-              if (state.assessment.requiresReferral)
+              if (assessment.requiresReferral)
                 _HomeNotice(
                   title: 'Latihan ditahan',
-                  message: state.assessment.reason,
+                  message: assessment.reason,
                   action: 'Lihat langkah rujukan',
                   onPressed: () => context.push('/referral'),
+                )
+              else if (!hasSchedule)
+                _HomeNotice(
+                  title: 'Belum ada jadwal latihan',
+                  message:
+                      'Buka modul jadwal untuk melihat rencana latihan Anda.',
+                  action: 'Buka jadwal',
+                  onPressed: () => context.go('/schedule'),
                 )
               else if (!state.scheduleApproved)
                 _HomeNotice(
@@ -142,24 +189,25 @@ class HomeScreen extends ConsumerWidget {
               if (canExercise) ...[
                 _TodayTargetCard(
                   activities: activities,
-                  onChanged: (id) =>
-                      ref.read(appStateProvider.notifier).toggleExercise(id),
+                  isUpdatingProgress: _isUpdatingProgress,
+                  onChanged: _toggleExercise,
                 ),
-                const SizedBox(height: 8),
-                AnimatedSwitcher(
-                  duration: MediaQuery.disableAnimationsOf(context)
-                      ? Duration.zero
-                      : const Duration(milliseconds: 180),
-                  child: Text(
-                    activities.isEmpty
-                        ? 'Tidak ada aktivitas terjadwal hari ini.'
-                        : completed == activities.length
-                        ? 'Target hari ini selesai. Terima kasih sudah konsisten!'
-                        : '$completed dari ${activities.length} target hari ini selesai',
-                    key: ValueKey(completed),
-                    style: const TextStyle(color: AppColors.dark, fontSize: 13),
+                if (activities.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  AnimatedSwitcher(
+                    duration: MediaQuery.disableAnimationsOf(context)
+                        ? Duration.zero
+                        : const Duration(milliseconds: 180),
+                    child: Text(
+                      progressMessage,
+                      key: ValueKey(progressMessage),
+                      style: const TextStyle(
+                        color: AppColors.dark,
+                        fontSize: 13,
+                      ),
+                    ),
                   ),
-                ),
+                ],
               ],
               const SizedBox(height: 16),
               Row(
@@ -179,7 +227,9 @@ class HomeScreen extends ConsumerWidget {
                   ),
                 ],
               ),
-              _PredictionCard(assessment: state.assessment),
+              _PredictionCard(assessment: assessment),
+            ],
+            if (state.hasSavedProfile) ...[
               const SizedBox(height: 24),
               const Text(
                 'Kondisi anda',
@@ -187,70 +237,49 @@ class HomeScreen extends ConsumerWidget {
               ),
               const SizedBox(height: 12),
               _MetricPair(
-                first: _HomeMetricCard(
+                first: _HomeMetricCard.fromAssessment(
                   title: 'MMSE',
-                  value: state.profile.mmse == null
-                      ? '—'
-                      : '${state.profile.mmse}/30',
-                  status: state.profile.mmse == null
-                      ? 'Belum diisi'
-                      : state.profile.mmse! >= 24
-                      ? 'baik'
-                      : 'pantau',
+                  factor: profile.mmse == null ? null : factors['MMSE'],
                 ),
-                second: _HomeMetricCard(
+                second: _HomeMetricCard.fromAssessment(
                   title: 'GDS',
-                  value: state.profile.gds == null
-                      ? '—'
-                      : '${state.profile.gds}/15',
-                  status: state.profile.gds == null
-                      ? 'Belum diisi'
-                      : state.profile.gds! <= 4
-                      ? 'baik'
-                      : 'pantau',
+                  factor: profile.gds == null ? null : factors['GDS-15'],
                 ),
               ),
               const SizedBox(height: 12),
               _MetricPair(
-                first: _HomeMetricCard(
+                first: _HomeMetricCard.fromAssessment(
                   title: 'TEKANAN DARAH',
-                  value:
-                      state.profile.systolic.isEmpty ||
-                          state.profile.diastolic.isEmpty
-                      ? '—'
-                      : '${state.profile.systolic}/${state.profile.diastolic}',
-                  status:
-                      state.profile.systolic.isEmpty ||
-                          state.profile.diastolic.isEmpty
-                      ? 'Belum diisi'
-                      : state.assessment.factors[2].points == 0
-                      ? 'baik'
-                      : 'pantau',
+                  factor: hasBloodPressure ? factors['Tensi'] : null,
                 ),
                 second: _HomeMetricCard(
                   title: 'KEPATUHAN',
-                  value: state.schedule.activities.isEmpty
-                      ? '—'
-                      : '${(state.schedule.progress * 100).round()}%',
-                  status: state.schedule.activities.isEmpty
-                      ? 'Belum ada jadwal'
-                      : '${state.schedule.completedCount}/${state.schedule.activities.length} selesai',
+                  value: hasSchedule
+                      ? '${(schedule.progress * 100).round()}%'
+                      : null,
+                  status: hasSchedule
+                      ? '${schedule.completedCount}/${schedule.activities.length} selesai'
+                      : 'Belum ada jadwal',
                 ),
               ),
+            ],
+            if (hasAssessment) ...[
               const SizedBox(height: 20),
               _RecommendationCard(
-                message: state.assessment.requiresReferral
+                message: assessment.requiresReferral
                     ? 'Latihan ditahan. Baca alasan rujukan dan diskusikan dengan tenaga kesehatan.'
+                    : !hasSchedule
+                    ? 'Belum ada jadwal latihan. Tanya tentang rencana latihan Anda.'
                     : !state.scheduleApproved
                     ? 'Jadwal belum disetujui. Tanya tentang aktivitas dan alasan penyusunan draf.'
-                    : pending.isNotEmpty
-                    ? 'Target berikutnya: ${pending.first.title}, ${pending.first.duration}.'
+                    : nextActivity != null
+                    ? 'Target berikutnya: ${nextActivity.title}, ${nextActivity.duration}.'
                     : activities.isNotEmpty
                     ? 'Semua target hari ini selesai. Lihat progres Anda bersama caregiver.'
                     : 'Hari ini tidak ada aktivitas terjadwal. Tanya tentang jadwal atau progres minggu ini.',
               ),
               if (state.activityInsight != null &&
-                  !state.assessment.requiresReferral) ...[
+                  !assessment.requiresReferral) ...[
                 const SizedBox(height: 20),
                 ActivityInsightCard(insight: state.activityInsight!),
                 TextButton(
@@ -303,8 +332,13 @@ class _HomeNotice extends StatelessWidget {
 }
 
 class _TodayTargetCard extends StatelessWidget {
-  const _TodayTargetCard({required this.activities, required this.onChanged});
+  const _TodayTargetCard({
+    required this.activities,
+    required this.isUpdatingProgress,
+    required this.onChanged,
+  });
   final List<ExerciseActivity> activities;
+  final bool isUpdatingProgress;
   final ValueChanged<String> onChanged;
   @override
   Widget build(BuildContext context) => Container(
@@ -333,11 +367,23 @@ class _TodayTargetCard extends StatelessWidget {
             ),
           ],
         ),
+        if (isUpdatingProgress) ...[
+          const LinearProgressIndicator(),
+          const SizedBox(height: 8),
+          Semantics(
+            liveRegion: true,
+            child: const Text('Memperbarui progres latihan…'),
+          ),
+          const SizedBox(height: 8),
+        ],
         if (activities.isEmpty)
           const Text('Hari tanpa sesi latihan. Lihat jadwal mingguan.')
         else
           for (final activity in activities) ...[
-            _TargetRow(activity: activity, onTap: () => onChanged(activity.id)),
+            _TargetRow(
+              activity: activity,
+              onTap: isUpdatingProgress ? null : () => onChanged(activity.id),
+            ),
             if (activity != activities.last) const SizedBox(height: 8),
           ],
       ],
@@ -348,7 +394,7 @@ class _TodayTargetCard extends StatelessWidget {
 class _TargetRow extends StatelessWidget {
   const _TargetRow({required this.activity, required this.onTap});
   final ExerciseActivity activity;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   @override
   Widget build(BuildContext context) => Semantics(
     label: '${activity.title}, ${activity.duration}',
@@ -517,10 +563,26 @@ class _MetricPair extends StatelessWidget {
 class _HomeMetricCard extends StatelessWidget {
   const _HomeMetricCard({
     required this.title,
-    required this.value,
     required this.status,
+    this.value,
   });
-  final String title, value, status;
+
+  factory _HomeMetricCard.fromAssessment({
+    required String title,
+    required ScoreFactor? factor,
+  }) {
+    if (factor == null) {
+      return _HomeMetricCard(title: title, status: 'Belum diisi');
+    }
+    return _HomeMetricCard(
+      title: title,
+      value: factor.value,
+      status: factor.points == 0 ? 'baik' : 'pantau',
+    );
+  }
+
+  final String title, status;
+  final String? value;
   @override
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 18),
@@ -539,7 +601,7 @@ class _HomeMetricCard extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text(
-          value,
+          value ?? '—',
           textAlign: TextAlign.center,
           style: const TextStyle(
             fontSize: 26,
